@@ -35,8 +35,18 @@ const origins = [...new Set([...explicitOrigins, ...extraOrigins])];
 function corsOrigin(origin, callback) {
   if (!origin) return callback(null, true);
   const cleanOrigin = String(origin).trim().replace(/\/$/, '');
+  const host = (() => {
+    try {
+      return new URL(cleanOrigin).hostname;
+    } catch {
+      return '';
+    }
+  })();
   if (origins.length === 0) return callback(null, true);
   if (origins.includes(cleanOrigin)) return callback(null, true);
+  if (host === 'www.mahadev2015.online' || host === 'mahadev2015.online') {
+    return callback(null, true);
+  }
   try {
     const { hostname } = new URL(cleanOrigin);
     if (hostname === 'localhost' || hostname === '127.0.0.1') {

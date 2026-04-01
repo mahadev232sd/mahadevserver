@@ -23,7 +23,7 @@ router.post(
     const code = String(crypto.randomInt(100000, 1000000));
     setOtp(phone, code);
     const payload = { message: 'OTP sent successfully' };
-    if (process.env.NODE_ENV !== 'production') {
+    if (process.env.NODE_ENV !== 'production' || String(process.env.ALLOW_DEV_OTP || '') === 'true') {
       payload.devOtp = code;
     }
     return res.json(payload);
