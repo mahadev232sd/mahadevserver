@@ -1,8 +1,11 @@
 import { Router } from 'express';
 import { body, param, query, validationResult } from 'express-validator';
+import crypto from 'crypto';
+import multer from 'multer';
 import { User } from '../models/User.js';
 import { GameID } from '../models/GameID.js';
 import { Transaction } from '../models/Transaction.js';
+import { DepositPaymentConfig } from '../models/DepositPaymentConfig.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { writeAllUsersExcel } from '../utils/writeUsersExcel.js';
 import { generatePlatformPassword, generateUniqueId, generateUsername } from '../utils/generateCredentials.js';
@@ -11,6 +14,66 @@ import { PLATFORMS } from '../config/platforms.js';
 const router = Router();
 
 router.use(requireAuth, requireAdmin);
+
+function cloudinarySignature(params, apiSecret) {
+  const sorted = Object.keys(params)
+    .sort()
+    .map((k) => `${k}=${params[k]}`)
+    .join('&');
+  return crypto
+    .createHash('sha1')
+    .update(`${sorted}${apiSecret}`)
+    .digest('hex');
+}
+
+async function uploadImageToCloudinary(file, folder) {
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+  const apiKey = process.env.CLOUDINARY_API_KEY;
+  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  if (!cloudName || !apiKey || !apiSecret) {
+    throw new Error('Cloudinary env is missing (CLOUDINARY_CLOUD_NAME/API_KEY/API_SECRET)');
+  }
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const signature = cloudinarySignature({ folder, timestamp }, apiSecret);
+  const ext = (file.originalname || '').split('.').pop()?.toLowerCase() || 'jpg';
+  const safeExt = ['jpg', 'jpeg', 'png', 'heic', 'heif', 'webp'].includes(ext) ? ext : 'jpg';
+
+  const form = new FormData();
+  form.append('file', new Blob([file.buffer], { type: file.mimetype || 'image/jpeg' }), `proof.${safeExt}`);
+  form.append('api_key', apiKey);
+  form.append('timestamp', String(timestamp));
+  form.append('folder', folder);
+  form.append('signature', signature);
+
+  const resp = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+    method: 'POST',
+    body: form,
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    throw new Error(data?.error?.message || 'Cloudinary upload failed');
+  }
+  return data.secure_url || data.url;
+}
+
+const uploadPayoutProof = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (String(file.mimetype || '').startsWith('image/')) return cb(null, true);
+    return cb(new Error('Only image files are allowed'));
+  },
+});
+
+const uploadDepositQr = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (String(file.mimetype || '').startsWith('image/')) return cb(null, true);
+    return cb(new Error('Only image files are allowed'));
+  },
+});
 
 function strongPlatformPassword(value) {
   const v = String(value || '');
@@ -271,8 +334,56 @@ router.get('/transactions', async (req, res) => {
   return res.json({ transactions });
 });
 
+router.get('/deposit-payment', async (_req, res) => {
+  const doc = await DepositPaymentConfig.findOne().sort({ updatedAt: -1 });
+  return res.json({ config: doc || null });
+});
+
+router.put(
+  '/deposit-payment',
+  uploadDepositQr.single('qrImage'),
+  [
+    body('upiId').optional().trim().isLength({ max: 120 }),
+    body('payeeName').optional().trim().isLength({ max: 120 }),
+    body('accountNumber').optional().trim().isLength({ max: 64 }),
+    body('ifsc').optional().trim().isLength({ max: 32 }),
+    body('bankName').optional().trim().isLength({ max: 120 }),
+    body('accountHolder').optional().trim().isLength({ max: 120 }),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    const prev = await DepositPaymentConfig.findOne().sort({ updatedAt: -1 });
+    const next = prev || new DepositPaymentConfig();
+
+    const setIf = (k) => {
+      if (req.body[k] != null) next[k] = String(req.body[k] || '').trim();
+    };
+    setIf('upiId');
+    setIf('payeeName');
+    setIf('accountNumber');
+    setIf('ifsc');
+    setIf('bankName');
+    setIf('accountHolder');
+
+    if (req.file) {
+      try {
+        next.qrImageUrl = await uploadImageToCloudinary(req.file, 'deposit-qr');
+      } catch (e) {
+        return res.status(500).json({ message: e.message || 'Failed to upload QR image' });
+      }
+    }
+
+    next.updatedBy = req.user?._id;
+    await next.save();
+    return res.json({ config: next });
+  }
+);
+
 router.post(
   '/transactions/:id/approve',
+  uploadPayoutProof.single('proof'),
   [param('id').isMongoId()],
   async (req, res) => {
     const errors = validationResult(req);
@@ -290,6 +401,14 @@ router.post(
         return res.status(400).json({ message: 'User balance too low to approve withdrawal' });
       }
       user.walletBalance -= tx.amount;
+
+      if (req.file) {
+        try {
+          tx.payoutProofImage = await uploadImageToCloudinary(req.file, 'payout-proofs');
+        } catch (e) {
+          return res.status(500).json({ message: e.message || 'Failed to upload payout proof' });
+        }
+      }
     }
     tx.status = 'approved';
     tx.adminNote = req.body?.note || tx.adminNote;

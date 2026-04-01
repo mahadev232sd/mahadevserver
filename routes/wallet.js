@@ -13,6 +13,7 @@ import {
   buildUpiPayUri,
   DEPOSIT_SESSION_MS,
 } from '../config/depositPayment.js';
+import { DepositPaymentConfig } from '../models/DepositPaymentConfig.js';
 
 const genRef = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ0123456789', 12);
 
@@ -102,9 +103,22 @@ router.post(
       if (!gameRef) return res.status(400).json({ message: 'Invalid game ID' });
     }
     const pay = getDepositPaymentDisplay();
+    const override = await DepositPaymentConfig.findOne().sort({ updatedAt: -1 });
+    const payMerged = override
+      ? {
+          ...pay,
+          upiId: override.upiId || pay.upiId,
+          payeeName: override.payeeName || pay.payeeName,
+          accountNumber: override.accountNumber || pay.accountNumber,
+          ifsc: override.ifsc || pay.ifsc,
+          bankName: override.bankName || pay.bankName,
+          accountHolder: override.accountHolder || pay.accountHolder,
+          ...(override.qrImageUrl ? { qrImageUrl: override.qrImageUrl } : {}),
+        }
+      : pay;
     const referenceCode = genRef();
     const depositExpiresAt = new Date(Date.now() + DEPOSIT_SESSION_MS);
-    const upiUri = buildUpiPayUri(amt, referenceCode, pay.payeeName, pay.upiId);
+    const upiUri = buildUpiPayUri(amt, referenceCode, payMerged.payeeName, payMerged.upiId);
 
     const tx = await Transaction.create({
       userId: req.user._id,
@@ -122,7 +136,7 @@ router.post(
       transaction: tx,
       expiresAt: depositExpiresAt.toISOString(),
       upiUri,
-      paymentDetails: pay,
+      paymentDetails: payMerged,
     });
   }
 );

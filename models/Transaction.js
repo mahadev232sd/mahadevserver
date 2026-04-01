@@ -17,6 +17,8 @@ const transactionSchema = new mongoose.Schema(
     depositUpiUri: { type: String, trim: true },
     utr: { type: String, trim: true },
     proofImage: { type: String, trim: true },
+    /** Admin proof for payouts (withdraw approvals) */
+    payoutProofImage: { type: String, trim: true },
   },
   { timestamps: true }
 );
