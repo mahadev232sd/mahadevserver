@@ -31,6 +31,30 @@ router.post(
 );
 
 router.post(
+  '/send-login-otp',
+  [body('phone').trim().notEmpty().withMessage('Phone is required')],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    const phone = normalizePhone(req.body.phone);
+    if (phone.length !== 10) {
+      return res.status(400).json({ message: 'Enter a valid 10-digit mobile number' });
+    }
+    const user = await User.findOne({ phone, role: 'user' });
+    if (!user) {
+      return res.status(404).json({ message: 'No account found with this phone number' });
+    }
+    const code = String(crypto.randomInt(100000, 1000000));
+    setOtp(phone, code);
+    const payload = { message: 'OTP sent successfully' };
+    if (process.env.NODE_ENV !== 'production' || String(process.env.ALLOW_DEV_OTP || '') === 'true') {
+      payload.devOtp = code;
+    }
+    return res.json(payload);
+  }
+);
+
+router.post(
   '/register',
   [
     body('username')
@@ -84,6 +108,31 @@ router.post(
       }
       return res.status(500).json({ message: e.message || 'Registration failed' });
     }
+  }
+);
+
+router.post(
+  '/login-otp',
+  [body('phone').trim().notEmpty(), body('otp').trim().notEmpty()],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+    const phone = normalizePhone(req.body.phone);
+    const otp = String(req.body.otp).trim();
+    if (phone.length !== 10) {
+      return res.status(400).json({ message: 'Enter a valid 10-digit mobile number' });
+    }
+    if (!verifyOtp(phone, otp)) {
+      return res.status(400).json({ message: 'Invalid or expired OTP' });
+    }
+    const user = await User.findOne({ phone, role: 'user' });
+    if (!user) {
+      return res.status(404).json({ message: 'Account not found' });
+    }
+    const token = signToken({ sub: user._id.toString(), role: user.role });
+    return res.json({ user, token });
   }
 );
 
